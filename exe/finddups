@@ -1,0 +1,151 @@
+#!/usr/bin/env ruby
+
+require 'digest/sha1'
+require 'json'
+require 'fileutils'
+require 'thread'
+require 'optparse'
+
+$LOAD_PATH.unshift(File.join(__dir__, '..', 'lib'))
+
+require 'finddups'
+
+@options = {
+  sort: 'atime',
+  depth: Float::INFINITY,
+  ignore: [],
+  threads: 16,
+}
+
+optparser = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+    finddups (version #{Finddups::VERSION})
+    Usage: #{File.basename(__FILE__)} [dirs] [options]
+  BANNER
+
+  opts.on("-i path", "--ignore path", "ignore paths") do |path|
+    @options[:ignore] << path
+  end
+
+  opts.on("--atime", "(default) Use file access time to sort duplicates") do
+    @options[:sort] = 'atime'
+  end
+
+  opts.on("--mtime", "Use file modification time to sort duplicates") do
+    @options[:sort] = 'mtime'
+  end
+
+  desc = <<~DESC
+    Use file change time to sort duplicates
+    (the time at which directory information about the file was changed, not the file itself)
+  DESC
+  opts.on("--ctime", desc) do
+    @options[:sort] = 'ctime'
+  end
+
+  opts.on("-t threads", "--threads threads", "Number of threads to use (default 16)") do |threads|
+    @options[:threads] = threads.to_i
+  end
+
+  opts.on("-d depth", "--depth depth", "Max depth to search") do |depth|
+    @options[:depth] = depth.to_i
+  end
+
+  opts.on("-h", "--help", "Show this help") do
+    puts opts
+    exit
+  end
+
+  opts.on("-v", "Show version") do
+    puts "finddups (version #{Finddups::VERSION})"
+    exit
+  end
+end
+
+optparser.parse!
+
+if ARGV.empty? || ARGV.any? { |entry| !File.directory?(entry) }
+  $stderr.puts "Every argument must be a directory"
+  exit 1
+end
+
+# ========
+# = Prog =
+# ========
+
+search_dirs = ARGV
+trash_dir = "/tmp/duplicates/"
+
+@mutex = Mutex.new
+@queue = []
+
+def search(directory, depth = 0)
+  # puts "Searching: #{directory}"
+
+  # Skips
+  return @duplicates if @options[:ignore].include?(File.basename(directory))
+
+  Dir.entries(directory).each do |entry|
+    next if entry.start_with?('.')
+    path = File.join(directory, entry)
+
+    if File.directory?(path)
+      if depth < @options[:depth]
+        @queue.push -> { search(path, depth + 1) }
+      end
+    elsif File.symlink?(path)
+      next
+    else
+      begin
+        digest = Digest::SHA1.hexdigest(File.read(path))
+        @mutex.synchronize do
+          @duplicates[digest] ||= []
+          @duplicates[digest] << path
+        end
+      rescue Errno::EINVAL => e
+        $stderr.puts "#{path}: #{e}"
+      end
+    end
+  end
+  @duplicates
+end
+
+@duplicates = {}
+
+search_dirs.each do |search_dir|
+  @queue.push -> { search(search_dir) }
+end
+
+until @queue.empty?
+  threads = []
+  @options[:threads].times do
+    _proc = @queue.shift
+    threads << Thread.new { _proc.call } if _proc
+  end
+  threads.each(&:join)
+end
+
+# Trim non dups
+@duplicates = @duplicates
+  .values
+  .reject do |files|
+    files.length < 2
+  end
+
+# Stort
+@duplicates.each do |dups|
+  dups = dups.sort do |a, b|
+    case @options[:sort]
+    when 'atime'
+      File.atime(a) <=> File.atime(a)
+    when 'mtime'
+      File.mtime(a) <=> File.mtime(a)
+    when 'ctime'
+      File.ctime(a) <=> File.ctime(a)
+    else
+      a.length <=> b.length
+    end
+  end
+end
+
+$stdout.puts JSON.pretty_generate(@duplicates)
