@@ -2,53 +2,54 @@
 
 require 'digest/sha1'
 require 'json'
+require 'yaml'
 require 'fileutils'
-require 'thread'
 require 'optparse'
 
 $LOAD_PATH.unshift(File.join(__dir__, '..', 'lib'))
 
 require 'finddups'
+require 'dup_finder'
 
-@options = {
-  sort: 'atime',
-  depth: Float::INFINITY,
-  ignore: [],
-  threads: 16,
-}
+options = {}
 
 optparser = OptionParser.new do |opts|
   opts.banner = <<~BANNER
-    finddups (version #{Finddups::VERSION})
+    finddups #{Finddups::VERSION}
     Usage: #{File.basename(__FILE__)} [dirs] [options]
   BANNER
 
   opts.on("-i path", "--ignore path", "ignore paths") do |path|
-    @options[:ignore] << path
-  end
-
-  opts.on("--atime", "(default) Use file access time to sort duplicates") do
-    @options[:sort] = 'atime'
-  end
-
-  opts.on("--mtime", "Use file modification time to sort duplicates") do
-    @options[:sort] = 'mtime'
-  end
-
-  desc = <<~DESC
-    Use file change time to sort duplicates
-    (the time at which directory information about the file was changed, not the file itself)
-  DESC
-  opts.on("--ctime", desc) do
-    @options[:sort] = 'ctime'
-  end
-
-  opts.on("-t threads", "--threads threads", "Number of threads to use (default 16)") do |threads|
-    @options[:threads] = threads.to_i
+    options[:ignore] ||= []
+    options[:ignore] << path
   end
 
   opts.on("-d depth", "--depth depth", "Max depth to search") do |depth|
-    @options[:depth] = depth.to_i
+    options[:depth] = depth.to_i
+  end
+
+  opts.on("--[no-]cache", "Perform caching") do |value|
+    options[:cache] = value
+  end
+
+  opts.on("--[no-]cache-to-tmp", "Save cache files to /tmp/file_hashes") do |value|
+    options[:cache_to_tmp] = value
+  end
+
+  opts.on("-o path", "--output path", "Output file path") do |path|
+    options[:output] = path
+  end
+
+  opts.on("--alg alg", "Hashing algorithm (SHA1, MD5)") do |alg|
+    options[:alg] = alg.downcase.to_sym
+    unless %i[md5 sha1].include?(options[:alg])
+      $stderr.puts "Unsupported algorithm: #{options[:alg]}"
+      exit 1
+    end
+  end
+
+  opts.on("--[no-]ignore-empty", "Ignore empty files") do |value|
+    options[:ignore_empty] = value
   end
 
   opts.on("-h", "--help", "Show this help") do
@@ -56,8 +57,8 @@ optparser = OptionParser.new do |opts|
     exit
   end
 
-  opts.on("-v", "Show version") do
-    puts "finddups (version #{Finddups::VERSION})"
+  opts.on("-v", "--version", "Show version") do
+    puts "finddups #{Finddups::VERSION}"
     exit
   end
 end
@@ -69,83 +70,16 @@ if ARGV.empty? || ARGV.any? { |entry| !File.directory?(entry) }
   exit 1
 end
 
-# ========
-# = Prog =
-# ========
+# Prog ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-search_dirs = ARGV
-trash_dir = "/tmp/duplicates/"
+dup_finder = DupFinder.new(options: options)
+ARGV.each { |path| dup_finder.queue(path) }
+dup_finder.search
 
-@mutex = Mutex.new
-@queue = []
-
-def search(directory, depth = 0)
-  # puts "Searching: #{directory}"
-
-  # Skips
-  return @duplicates if @options[:ignore].include?(File.basename(directory))
-
-  Dir.entries(directory).each do |entry|
-    next if entry.start_with?('.')
-    path = File.join(directory, entry)
-
-    if File.directory?(path)
-      if depth < @options[:depth]
-        @queue.push -> { search(path, depth + 1) }
-      end
-    elsif File.symlink?(path)
-      next
-    else
-      begin
-        digest = Digest::SHA1.hexdigest(File.read(path))
-        @mutex.synchronize do
-          @duplicates[digest] ||= []
-          @duplicates[digest] << path
-        end
-      rescue Errno::EINVAL => e
-        $stderr.puts "#{path}: #{e}"
-      end
-    end
+if options[:output]
+  File.open(options[:output], 'w') do |file|
+    file.write(JSON.pretty_generate(dup_finder.duplicate_entries))
   end
-  @duplicates
+else
+  $stdout.puts JSON.pretty_generate(dup_finder.duplicate_entries)
 end
-
-@duplicates = {}
-
-search_dirs.each do |search_dir|
-  @queue.push -> { search(search_dir) }
-end
-
-until @queue.empty?
-  threads = []
-  @options[:threads].times do
-    _proc = @queue.shift
-    threads << Thread.new { _proc.call } if _proc
-  end
-  threads.each(&:join)
-end
-
-# Trim non dups
-@duplicates = @duplicates
-  .values
-  .reject do |files|
-    files.length < 2
-  end
-
-# Stort
-@duplicates.each do |dups|
-  dups = dups.sort do |a, b|
-    case @options[:sort]
-    when 'atime'
-      File.atime(a) <=> File.atime(a)
-    when 'mtime'
-      File.mtime(a) <=> File.mtime(a)
-    when 'ctime'
-      File.ctime(a) <=> File.ctime(a)
-    else
-      a.length <=> b.length
-    end
-  end
-end
-
-$stdout.puts JSON.pretty_generate(@duplicates)
