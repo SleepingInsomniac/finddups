@@ -1,6 +1,7 @@
 # Finddups
 
 Shows duplicate files within a list of directories and outputs as JSON.
+This is accomplished by generating a hash digest each file and comparing the hashes.
 
 ## Installation
 
@@ -9,17 +10,17 @@ Shows duplicate files within a list of directories and outputs as JSON.
 ## Usage
 
 ```
-finddups (version 0.1.0)
+finddups 0.2.0
 Usage: finddups [dirs] [options]
     -i, --ignore path                ignore paths
-        --atime                      (default) Use file access time to sort duplicates
-        --mtime                      Use file modification time to sort duplicates
-        --ctime                      Use file change time to sort duplicates
-(the time at which directory information about the file was changed, not the file itself)
-    -t, --threads threads            Number of threads to use (default 16)
     -d, --depth depth                Max depth to search
+        --[no-]cache                 Perform caching
+        --[no-]cache-to-tmp          Save cache files to /tmp/file_hashes
+    -o, --output path                Output file path
+        --alg alg                    Hashing algorithm (SHA1, MD5)
+        --[no-]ignore-empty          Ignore empty files
     -h, --help                       Show this help
-    -v                               Show version
+    -v, --version                    Show version
 ```
 
 Example:
